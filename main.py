@@ -12,6 +12,7 @@ import json
 import time
 import threading
 import queue
+import subprocess
 from dataclasses import dataclass
 from typing import Optional, Tuple, Callable
 from enum import Enum
@@ -41,6 +42,7 @@ class StreamConfig:
     movement_mode: MovementMode = MovementMode.NORMAL
     auto_save: bool = True
     config_file: str = "stream_config.json"
+    rtmp_url: str = "rtmp://localhost/live/stream"
 
 class StreamCapture:
     """Core capture engine - handles screen capture and region extraction"""
@@ -277,7 +279,8 @@ class ConfigManager:
             'width': config.width,
             'height': config.height,
             'overlay_mode': config.overlay_mode.value,
-            'movement_mode': config.movement_mode.value
+            'movement_mode': config.movement_mode.value,
+            'rtmp_url': config.rtmp_url
         }
         with open(config.config_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -297,9 +300,81 @@ class ConfigManager:
                 config.height = data.get('height', config.height)
                 config.overlay_mode = OverlayMode(data.get('overlay_mode', 2))
                 config.movement_mode = MovementMode(data.get('movement_mode', 5))
+                config.rtmp_url = data.get('rtmp_url', config.rtmp_url)
             return True
         except:
             return False
+
+class StreamOutput:
+    """Handles stream output to file or network"""
+    
+    def __init__(self, config: StreamConfig):
+        self.config = config
+        self.recording = False
+        self.video_writer = None
+        self.ffmpeg_process = None
+        
+    def start_recording(self, filename: str = None):
+        """Start recording to file"""
+        if not filename:
+            filename = f"recording_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.video_writer = cv2.VideoWriter(
+            filename, fourcc, 30.0, 
+            (self.config.width, self.config.height)
+        )
+        self.recording = True
+        print(f"Recording to: {filename}")
+        
+    def stop_recording(self):
+        """Stop recording"""
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
+        self.recording = False
+        print("Recording stopped")
+        
+    def write_frame(self, frame):
+        """Write frame to video file"""
+        if self.recording and self.video_writer:
+            self.video_writer.write(frame)
+            
+    def start_rtmp_stream(self, url: str):
+        """Start streaming to RTMP server"""
+        command = [
+            'ffmpeg',
+            '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f'{self.config.width}x{self.config.height}',
+            '-r', '30',
+            '-i', '-',
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-maxrate', '3000k',
+            '-bufsize', '6000k',
+            '-pix_fmt', 'yuv420p',
+            '-g', '60',
+            '-f', 'flv',
+            url
+        ]
+        
+        self.ffmpeg_process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        print(f"Streaming to: {url}")
+        
+    def stream_frame(self, frame):
+        """Send frame to RTMP stream"""
+        if self.ffmpeg_process and self.ffmpeg_process.stdin:
+            try:
+                self.ffmpeg_process.stdin.write(frame.tobytes())
+            except:
+                pass
 
 class UnifiedStreamSystem:
     """Main system orchestrator"""
@@ -310,6 +385,7 @@ class UnifiedStreamSystem:
         self.overlay = OverlayRenderer(self.config)
         self.movement = MovementController(self.config)
         self.config_manager = ConfigManager()
+        self.output = StreamOutput(self.config)
         
         # Load saved config
         if self.config_manager.load(self.config):
@@ -331,6 +407,8 @@ class UnifiedStreamSystem:
         print("  R          : Reset position")
         print("  S          : Save config")
         print("  Space      : Snapshot")
+        print("  V          : Start/stop recording")
+        print("  M          : Start RTMP stream")
         print("  Q          : Quit")
         
         # Start capture
@@ -353,6 +431,10 @@ class UnifiedStreamSystem:
                 
                 # Show frame
                 cv2.imshow('Glasses Stream', display)
+                
+                # Handle recording/streaming
+                self.output.write_frame(frame)
+                self.output.stream_frame(frame)
                 
                 # Handle input
                 if not self._handle_input():
@@ -440,8 +522,27 @@ class UnifiedStreamSystem:
                 cv2.imwrite(filename, frame)
                 print(f"Saved: {filename}")
                 
+        # Recording
+        elif key == ord('v'):
+            if self.output.recording:
+                self.output.stop_recording()
+            else:
+                self.output.start_recording()
+                
+        # RTMP Stream
+        elif key == ord('m'):
+            if not self.output.ffmpeg_process:
+                print(f"\nStarting RTMP stream to {self.config.rtmp_url}")
+                self.output.start_rtmp_stream(self.config.rtmp_url)
+            else:
+                print("Stopping RTMP stream")
+                if self.output.ffmpeg_process:
+                    self.output.ffmpeg_process.terminate()
+                    self.output.ffmpeg_process = None
+                
         # Quit
         elif key == ord('q') or key == 27:
+            self.output.stop_recording()
             return False
             
         return True

@@ -4,5 +4,6 @@
   "width": 340,
   "height": 230,
   "overlay_mode": 2,
-  "movement_mode": 5
+  "movement_mode": 5,
+  "rtmp_url": "rtmp://localhost/live/stream"
 }
